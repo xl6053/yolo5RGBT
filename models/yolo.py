@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 if platform.system() != "Windows":
     ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
-
+from models.common import Slice, EdgeGenerator, CosineGuidedFusion
 from models.common import (
     C3,
     C3SPP,
@@ -433,6 +433,19 @@ def parse_model(d, ch):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+        
+               
+        elif m is Slice:
+            c2 = args[0][1] - args[0][0]
+        elif m is EdgeGenerator:
+            c1 = ch[f[0]] if isinstance(f, list) else ch[f]
+            c2 = args[0]
+            args = [c1, c2]
+        elif m is CosineGuidedFusion:
+            c1 = ch[f[0]] if isinstance(f, list) else ch[f]
+            c2 = make_divisible(args[0] * gw, 8)
+            args = [c1, c2]
+        
         # TODO: channel, gw, gd
         elif m in {Detect, Segment}:
             args.append([ch[x] for x in f])

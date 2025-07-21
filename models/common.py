@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from torch.cuda import amp
-
+import torch.nn.functional as F
 # Import 'ultralytics' package or install if missing
 try:
     import ultralytics
@@ -1121,3 +1121,64 @@ class Classify(nn.Module):
         if isinstance(x, list):
             x = torch.cat(x, 1)
         return self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+class Slice(nn.Module):
+    def __init__(self, indices):
+        super().__init__()
+        self.indices = indices
+    def forward(self, x):
+        return x[:, self.indices[0]:self.indices[1], :, :]
+
+class EdgeGenerator(nn.Module):
+    def __init__(self, c_in, c_out):
+        super().__init__()
+        self.c_out = c_out
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32)
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32)
+        sobel_weight = torch.stack([sobel_x, sobel_y]).unsqueeze(1)
+        self.gradient_conv = nn.Conv2d(1, 2, kernel_size=3, padding=1, bias=False)
+        self.gradient_conv.weight = nn.Parameter(sobel_weight, requires_grad=False)
+    def forward(self, x):
+        F_rgb, F_thermal = x
+        gray_rgb = 0.2989 * F_rgb[:, 0:1] + 0.5870 * F_rgb[:, 1:2] + 0.1140 * F_rgb[:, 2:3]
+        gray_thermal = F_thermal[:, 0:1]
+        G_rgb = self.gradient_conv(gray_rgb)
+        G_thermal = self.gradient_conv(gray_thermal)
+        return G_rgb + G_thermal
+
+# 在 models/common.py 文件中，使用这个最终的、逻辑正确的版本
+
+class CosineGuidedFusion(nn.Module):
+    def __init__(self, c_in, c_out):
+        super().__init__()
+        # 初始化部分是正确的，它为输入通道数为 c_in 的特征图准备了梯度计算层
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32)
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32)
+        sobel_weight = torch.stack([sobel_x, sobel_y]).unsqueeze(1)
+        self.gradient_conv = nn.Conv2d(c_in, c_in * 2, kernel_size=3, padding=1, groups=c_in, bias=False)
+        self.gradient_conv.weight = nn.Parameter(sobel_weight.repeat(c_in, 1, 1, 1), requires_grad=False)
+        self.softmax = nn.Softmax(dim=1)
+        self.final_conv = nn.Conv2d(c_in, c_out, kernel_size=1)
+
+    def forward(self, x):
+        # 1. 正确地解包三个输入特征图
+        F_rgb, F_thermal, F_edge_anchor = x
+        B, C, H, W = F_rgb.shape  # C 是输入通道数 (例如 128)
+
+        # 2. 为所有三个输入特征图计算梯度，得到三个形状完全相同的梯度图
+        G_rgb = self.gradient_conv(F_rgb)
+        G_thermal = self.gradient_conv(F_thermal)
+        G_anchor = self.gradient_conv(F_edge_anchor)  # <-- 这就是关键的修正！
+
+        # 3. 现在，张量尺寸完全匹配，可以正确计算余弦相似度
+        sim_rgb = F.cosine_similarity(G_rgb.view(B, -1), G_anchor.view(B, -1), dim=1)
+        sim_thermal = F.cosine_similarity(G_thermal.view(B, -1), G_anchor.view(B, -1), dim=1)
+
+        # 4. 后续的Softmax和加权融合逻辑都是正确的
+        similarities = torch.stack([sim_rgb, sim_thermal], dim=1)
+        weights = self.softmax(similarities)
+        w_rgb = weights[:, 0].view(B, 1, 1, 1)
+        w_thermal = weights[:, 1].view(B, 1, 1, 1)
+        F_weighted_fused = w_rgb * F_rgb + w_thermal * F_thermal
+
+        # 5. 最后的1x1卷积
+        return self.final_conv(F_weighted_fused)

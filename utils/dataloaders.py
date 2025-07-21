@@ -845,31 +845,42 @@ class LoadImagesAndLabels(Dataset):
 
         return torch.from_numpy(img), labels_out, self.im_files[index], shapes
 
+# =================================================================================
+# ============ 在 utils/dataloaders.py 中，用这个函数替换旧的 load_image ============
+# =================================================================================
     def load_image(self, i):
-        """
-        Loads an image by index, returning the image, its original dimensions, and resized dimensions.
+        # Loads 1 image from dataset index i, returns im, original hw, resized hw
+        
+        # 1. --- 路径处理 ---
+        # 获取RGB图像的路径
+        path = self.im_files[i] 
+        
+        # 注意：这里的 .replace('visible', 'lwir') 高度依赖你的文件夹命名
+        thermal_path = path.replace('/images/', '/thermal/')
+        
+        # 2. --- 分别读取RGB和热成像（作为灰度图）---
+        im_rgb = cv2.imread(path)  # 读取为 (H, W, 3) 的 BGR 图像
+        assert im_rgb is not None, f'Image Not Found {path}'
+        
+        im_thermal = cv2.imread(thermal_path, cv2.IMREAD_GRAYSCALE) # 读取为 (H, W) 的灰度图
+        assert im_thermal is not None, f'Image Not Found {thermal_path}'
 
-        Returns (im, original hw, resized hw)
-        """
-        im, f, fn = (
-            self.ims[i],
-            self.im_files[i],
-            self.npy_files[i],
-        )
-        if im is None:  # not cached in RAM
-            if fn.exists():  # load npy
-                im = np.load(fn)
-            else:  # read image
-                im = cv2.imread(f)  # BGR
-                assert im is not None, f"Image Not Found {f}"
-            h0, w0 = im.shape[:2]  # orig hw
-            r = self.img_size / max(h0, w0)  # ratio
-            if r != 1:  # if sizes are not equal
-                interp = cv2.INTER_LINEAR if (self.augment or r > 1) else cv2.INTER_AREA
-                im = cv2.resize(im, (math.ceil(w0 * r), math.ceil(h0 * r)), interpolation=interp)
-            return im, (h0, w0), im.shape[:2]  # im, hw_original, hw_resized
-        return self.ims[i], self.im_hw0[i], self.im_hw[i]  # im, hw_original, hw_resized
+        # 3. --- 将单通道的热力图扩展一个维度 ---
+        im_thermal = im_thermal[..., np.newaxis]  # 形状从 (H, W) 变为 (H, W, 1)
 
+        # 4. --- 沿着通道维度将它们合并成一个4通道图像 ---
+        # 最终的 `im` 变量是 (H, W, 4) 的 Numpy 数组
+        im = np.concatenate((im_rgb, im_thermal), axis=2)
+
+        # --- 后续的尺寸调整代码基本保持不变 ---
+        h0, w0 = im.shape[:2]  # orig hw
+        r = self.img_size / max(h0, w0)  # ratio
+        if r != 1:  # if sizes are not equal
+            # 注意：cv2.resize可以直接处理4通道图像
+            im = cv2.resize(im, (int(w0 * r), int(h0 * r)),
+                            interpolation=cv2.INTER_LINEAR if self.augment else cv2.INTER_AREA)
+                            
+        return im, (h0, w0), im.shape[:2]  # im, hw_original, hw_resized
     def cache_images_to_disk(self, i):
         """Saves an image to disk as an *.npy file for quicker loading, identified by index `i`."""
         f = self.npy_files[i]
