@@ -19,9 +19,10 @@ import pandas as pd
 import requests
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from PIL import Image
 from torch.cuda import amp
-import torch.nn.functional as F
+
 # Import 'ultralytics' package or install if missing
 try:
     import ultralytics
@@ -1121,12 +1122,16 @@ class Classify(nn.Module):
         if isinstance(x, list):
             x = torch.cat(x, 1)
         return self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+
+
 class Slice(nn.Module):
     def __init__(self, indices):
         super().__init__()
         self.indices = indices
+
     def forward(self, x):
-        return x[:, self.indices[0]:self.indices[1], :, :]
+        return x[:, self.indices[0] : self.indices[1], :, :]
+
 
 class EdgeGenerator(nn.Module):
     def __init__(self, c_in, c_out):
@@ -1137,6 +1142,7 @@ class EdgeGenerator(nn.Module):
         sobel_weight = torch.stack([sobel_x, sobel_y]).unsqueeze(1)
         self.gradient_conv = nn.Conv2d(1, 2, kernel_size=3, padding=1, bias=False)
         self.gradient_conv.weight = nn.Parameter(sobel_weight, requires_grad=False)
+
     def forward(self, x):
         F_rgb, F_thermal = x
         gray_rgb = 0.2989 * F_rgb[:, 0:1] + 0.5870 * F_rgb[:, 1:2] + 0.1140 * F_rgb[:, 2:3]
@@ -1145,7 +1151,9 @@ class EdgeGenerator(nn.Module):
         G_thermal = self.gradient_conv(gray_thermal)
         return G_rgb + G_thermal
 
+
 # 在 models/common.py 文件中，使用这个最终的、逻辑正确的版本
+
 
 class CosineGuidedFusion(nn.Module):
     def __init__(self, c_in, c_out):
