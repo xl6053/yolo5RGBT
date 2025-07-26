@@ -1,0 +1,10 @@
+# FLIR RGBT Dataset Configuration
+
+path: /home/azureuser/datasets/FLIR_yolov5_dataset
+
+train: images/train
+val: images/val
+
+# Classes
+nc: 3
+names: ['person', 'car', 'bicycle']
