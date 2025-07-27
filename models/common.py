@@ -1146,13 +1146,12 @@ class EdgeGenerator(nn.Module):
         return G_rgb + G_thermal
 
 # 用这个版本完全替换你原来的 ChannelAttention
+# 用这个新的、更简洁的版本替换你原来的 ChannelAttention 类
 class ChannelAttention(nn.Module):
     def __init__(self, in_planes, ratio=16):
         super(ChannelAttention, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-
-        # 使用 nn.Linear 代替 nn.Conv2d，这是更稳定和常见的实现方式
+        # 我们已经移除了会引发确定性错误的 AdaptiveMaxPool2d
         self.fc = nn.Sequential(
             nn.Linear(in_planes, in_planes // ratio, bias=False),
             nn.ReLU(inplace=True),
@@ -1162,11 +1161,9 @@ class ChannelAttention(nn.Module):
 
     def forward(self, x):
         b, c, _, _ = x.size()
-        # 先view成 (b, c) 再送入全连接层
-        avg_out = self.fc(self.avg_pool(x).view(b, c)).view(b, c, 1, 1)
-        max_out = self.fc(self.max_pool(x).view(b, c)).view(b, c, 1, 1)
-        out = avg_out + max_out
-        return self.sigmoid(out)
+        # 通道注意力的计算现在只依赖于平均池化
+        y = self.fc(self.avg_pool(x).view(b, c)).view(b, c, 1, 1)
+        return self.sigmoid(y)
 
 # 用这个版本完全替换你原来的 SpatialAttention
 class SpatialAttention(nn.Module):
