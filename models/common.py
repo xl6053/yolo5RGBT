@@ -1145,57 +1145,68 @@ class EdgeGenerator(nn.Module):
         G_thermal = self.gradient_conv(gray_thermal)
         return G_rgb + G_thermal
 
+# 用这个版本完全替换你原来的 ChannelAttention
 class ChannelAttention(nn.Module):
     def __init__(self, in_planes, ratio=16):
         super(ChannelAttention, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
-        self.fc = nn.Sequential(nn.Conv2d(in_planes, in_planes // ratio, 1, bias=False),
-                                nn.ReLU(),
-                                nn.Conv2d(in_planes // ratio, in_planes, 1, bias=False))
+
+        # 使用 nn.Linear 代替 nn.Conv2d，这是更稳定和常见的实现方式
+        self.fc = nn.Sequential(
+            nn.Linear(in_planes, in_planes // ratio, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_planes // ratio, in_planes, bias=False)
+        )
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        avg_out = self.fc(self.avg_pool(x))
-        max_out = self.fc(self.max_pool(x))
+        b, c, _, _ = x.size()
+        # 先view成 (b, c) 再送入全连接层
+        avg_out = self.fc(self.avg_pool(x).view(b, c)).view(b, c, 1, 1)
+        max_out = self.fc(self.max_pool(x).view(b, c)).view(b, c, 1, 1)
         out = avg_out + max_out
-        # Add .contiguous() here before the sigmoid call
-        return self.sigmoid(out.contiguous())
+        return self.sigmoid(out)
 
+# 用这个版本完全替换你原来的 SpatialAttention
 class SpatialAttention(nn.Module):
     def __init__(self, kernel_size=7):
         super(SpatialAttention, self).__init__()
-        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=kernel_size // 2, bias=False)
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding = 3 if kernel_size == 7 else 1
+        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
+        # 在模块的最开始就强制内存连续，杜绝后患
+        x = x.contiguous()
+        
         avg_out = torch.mean(x, dim=1, keepdim=True)
         max_out, _ = torch.max(x, dim=1, keepdim=True)
-        x = torch.cat([avg_out, max_out], dim=1)
-        x = self.conv1(x)
-        return self.sigmoid(x)
+        
+        # 明确地将拼接结果赋给一个新变量
+        x_cat = torch.cat([avg_out, max_out], dim=1)
+        x_cat = self.conv1(x_cat)
+        return self.sigmoid(x_cat)
+
 
 class CBAM(nn.Module):
-    # __init__ 函数保持不变
     def __init__(self, in_planes, ratio=16, kernel_size=7):
         super(CBAM, self).__init__()
+        # 确保这里调用的是上面重构后的新版本
         self.ca = ChannelAttention(in_planes, ratio)
         self.sa = SpatialAttention(kernel_size)
 
     def forward(self, x):
-        # 保存原始的数据类型 (可能是 float16)
+        # 保留这层最强的保险：临时禁用AMP
         original_dtype = x.dtype
-        
-        # 使用 with 上下文管理器，在此代码块内临时禁用AMP
         with torch.cuda.amp.autocast(enabled=False):
-            # 将输入手动转为 float32
             x_float = x.float()
             
-            # 以下所有计算都在 float32 下进行，可以完全避免 float16 带来的对齐问题
+            # 使用重构后的模块进行计算
             x_float = self.ca(x_float) * x_float
             x_float = self.sa(x_float) * x_float
         
-        # 将计算结果转换回原始的数据类型，以匹配网络后续层
         return x_float.to(original_dtype)
 
 class CosineGuidedFusion(nn.Module):
