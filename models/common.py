@@ -1176,19 +1176,27 @@ class SpatialAttention(nn.Module):
         return self.sigmoid(x)
 
 class CBAM(nn.Module):
+    # __init__ 函数保持不变
     def __init__(self, in_planes, ratio=16, kernel_size=7):
         super(CBAM, self).__init__()
         self.ca = ChannelAttention(in_planes, ratio)
         self.sa = SpatialAttention(kernel_size)
 
     def forward(self, x):
-        x = self.ca(x).contiguous() * x.contiguous()
-        x = self.sa(x).contiguous() * x.contiguous()
-        return x
-
-
-        # 5. 最后的1x1卷积
-        return self.final_conv(F_weighted_fused)
+        # 保存原始的数据类型 (可能是 float16)
+        original_dtype = x.dtype
+        
+        # 使用 with 上下文管理器，在此代码块内临时禁用AMP
+        with torch.cuda.amp.autocast(enabled=False):
+            # 将输入手动转为 float32
+            x_float = x.float()
+            
+            # 以下所有计算都在 float32 下进行，可以完全避免 float16 带来的对齐问题
+            x_float = self.ca(x_float) * x_float
+            x_float = self.sa(x_float) * x_float
+        
+        # 将计算结果转换回原始的数据类型，以匹配网络后续层
+        return x_float.to(original_dtype)
 
 class CosineGuidedFusion(nn.Module):
     def __init__(self, c_in, c_out):
