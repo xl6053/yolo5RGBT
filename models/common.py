@@ -1145,40 +1145,96 @@ class EdgeGenerator(nn.Module):
         G_thermal = self.gradient_conv(gray_thermal)
         return G_rgb + G_thermal
 
-# 在 models/common.py 文件中，使用这个最终的、逻辑正确的版本
+class ChannelAttention(nn.Module):
+    def __init__(self, in_planes, ratio=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Sequential(nn.Conv2d(in_planes, in_planes // ratio, 1, bias=False),
+                                nn.ReLU(),
+                                nn.Conv2d(in_planes // ratio, in_planes, 1, bias=False))
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = self.fc(self.avg_pool(x))
+        max_out = self.fc(self.max_pool(x))
+        out = avg_out + max_out
+        return self.sigmoid(out)
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=kernel_size // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x = torch.cat([avg_out, max_out], dim=1)
+        x = self.conv1(x)
+        return self.sigmoid(x)
+
+class CBAM(nn.Module):
+    def __init__(self, in_planes, ratio=16, kernel_size=7):
+        super(CBAM, self).__init__()
+        self.ca = ChannelAttention(in_planes, ratio)
+        self.sa = SpatialAttention(kernel_size)
+
+    def forward(self, x):
+        x = self.ca(x) * x
+        x = self.sa(x) * x
+        return x
+
+
+        # 5. 最后的1x1卷积
+        return self.final_conv(F_weighted_fused)
 
 class CosineGuidedFusion(nn.Module):
     def __init__(self, c_in, c_out):
         super().__init__()
-        # 初始化部分是正确的，它为输入通道数为 c_in 的特征图准备了梯度计算层
+        # 梯度计算层保持不变
         sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32)
         sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32)
         sobel_weight = torch.stack([sobel_x, sobel_y]).unsqueeze(1)
         self.gradient_conv = nn.Conv2d(c_in, c_in * 2, kernel_size=3, padding=1, groups=c_in, bias=False)
         self.gradient_conv.weight = nn.Parameter(sobel_weight.repeat(c_in, 1, 1, 1), requires_grad=False)
+        
+        # Softmax和最后的1x1卷积层也保持不变
         self.softmax = nn.Softmax(dim=1)
         self.final_conv = nn.Conv2d(c_in, c_out, kernel_size=1)
 
+        # --- 新增内容: 为每个输入分支创建一个独立的CBAM注意力模块 ---
+        self.cbam_rgb = CBAM(c_in)
+        self.cbam_thermal = CBAM(c_in)
+        self.cbam_edge = CBAM(c_in)
+        # --------------------------------------------------------
+
     def forward(self, x):
-        # 1. 正确地解包三个输入特征图
         F_rgb, F_thermal, F_edge_anchor = x
-        B, C, H, W = F_rgb.shape  # C 是输入通道数 (例如 128)
+        B, C, H, W = F_rgb.shape
 
-        # 2. 为所有三个输入特征图计算梯度，得到三个形状完全相同的梯度图
-        G_rgb = self.gradient_conv(F_rgb)
-        G_thermal = self.gradient_conv(F_thermal)
-        G_anchor = self.gradient_conv(F_edge_anchor)  # <-- 这就是关键的修正！
+        # --- 修改内容: 在计算梯度前，先用CBAM处理特征 ---
+        # 这一步是特征“精炼”
+        F_rgb_attn = self.cbam_rgb(F_rgb)
+        F_thermal_attn = self.cbam_thermal(F_thermal)
+        F_edge_attn = self.cbam_edge(F_edge_anchor)
+        # -----------------------------------------------
 
-        # 3. 现在，张量尺寸完全匹配，可以正确计算余弦相似度
+        # 接下来，使用经过注意力处理的、更“纯净”的特征图来计算梯度
+        G_rgb = self.gradient_conv(F_rgb_attn)
+        G_thermal = self.gradient_conv(F_thermal_attn)
+        G_anchor = self.gradient_conv(F_edge_attn)
+
+        # 后续的计算逻辑完全不变，但输入已经是“精炼”过的数据了
         sim_rgb = F.cosine_similarity(G_rgb.view(B, -1), G_anchor.view(B, -1), dim=1)
         sim_thermal = F.cosine_similarity(G_thermal.view(B, -1), G_anchor.view(B, -1), dim=1)
-
-        # 4. 后续的Softmax和加权融合逻辑都是正确的
+        
         similarities = torch.stack([sim_rgb, sim_thermal], dim=1)
         weights = self.softmax(similarities)
         w_rgb = weights[:, 0].view(B, 1, 1, 1)
         w_thermal = weights[:, 1].view(B, 1, 1, 1)
+        
+        # 注意：最终加权的还是【原始】的特征图，注意力机制只用于帮助计算出更准确的权重
         F_weighted_fused = w_rgb * F_rgb + w_thermal * F_thermal
-
-        # 5. 最后的1x1卷积
+        
         return self.final_conv(F_weighted_fused)
