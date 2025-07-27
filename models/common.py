@@ -1159,7 +1159,8 @@ class ChannelAttention(nn.Module):
         avg_out = self.fc(self.avg_pool(x))
         max_out = self.fc(self.max_pool(x))
         out = avg_out + max_out
-        return self.sigmoid(out)
+        # Add .contiguous() here before the sigmoid call
+        return self.sigmoid(out.contiguous())
 
 class SpatialAttention(nn.Module):
     def __init__(self, kernel_size=7):
@@ -1181,8 +1182,8 @@ class CBAM(nn.Module):
         self.sa = SpatialAttention(kernel_size)
 
     def forward(self, x):
-        x = self.ca(x).contiguous() * x.contiguous()
-        x = self.ca(x).contiguous() * x.contiguous()
+         x = self.ca(x) * x
+         x = self.sa(x) * x
         return x
 
 
