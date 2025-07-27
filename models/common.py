@@ -1182,8 +1182,8 @@ class CBAM(nn.Module):
         self.sa = SpatialAttention(kernel_size)
 
     def forward(self, x):
-        x = self.ca(x) * x
-        x = self.sa(x) * x
+        x = self.ca(x).contiguous() * x.contiguous()
+        x = self.sa(x).contiguous() * x.contiguous()
         return x
 
 
