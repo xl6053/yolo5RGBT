@@ -7,4 +7,4 @@ val: images/val
 
 # Classes
 nc: 3
-names: ['person', 'car', 'bicycle']
+names: ["person", "car", "bicycle"]
