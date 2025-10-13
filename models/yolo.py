@@ -24,7 +24,6 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 if platform.system() != "Windows":
     ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
-from models.common import Slice, EdgeGenerator, CosineGuidedFusion
 from models.common import (
     C3,
     C3SPP,
@@ -39,15 +38,18 @@ from models.common import (
     Concat,
     Contract,
     Conv,
+    CosineGuidedFusion,
     CrossConv,
     DetectMultiBackend,
     DWConv,
     DWConvTranspose2d,
+    EdgeGenerator,
     Expand,
     Focus,
     GhostBottleneck,
     GhostConv,
     Proto,
+    Slice,
 )
 from models.experimental import MixConv2d
 from utils.autoanchor import check_anchor_order
@@ -433,8 +435,7 @@ def parse_model(d, ch):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        
-               
+
         elif m is Slice:
             c2 = args[0][1] - args[0][0]
         elif m is EdgeGenerator:
@@ -445,7 +446,7 @@ def parse_model(d, ch):
             c1 = ch[f[0]] if isinstance(f, list) else ch[f]
             c2 = make_divisible(args[0] * gw, 8)
             args = [c1, c2]
-        
+
         # TODO: channel, gw, gd
         elif m in {Detect, Segment}:
             args.append([ch[x] for x in f])
