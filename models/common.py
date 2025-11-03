@@ -19,9 +19,10 @@ import pandas as pd
 import requests
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from PIL import Image
 from torch.cuda import amp
-import torch.nn.functional as F
+
 # Import 'ultralytics' package or install if missing
 try:
     import ultralytics
@@ -1121,12 +1122,16 @@ class Classify(nn.Module):
         if isinstance(x, list):
             x = torch.cat(x, 1)
         return self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+
+
 class Slice(nn.Module):
     def __init__(self, indices):
         super().__init__()
         self.indices = indices
+
     def forward(self, x):
-        return x[:, self.indices[0]:self.indices[1], :, :]
+        return x[:, self.indices[0] : self.indices[1], :, :]
+
 
 class EdgeGenerator(nn.Module):
     def __init__(self, c_in, c_out):
@@ -1137,6 +1142,7 @@ class EdgeGenerator(nn.Module):
         sobel_weight = torch.stack([sobel_x, sobel_y]).unsqueeze(1)
         self.gradient_conv = nn.Conv2d(1, 2, kernel_size=3, padding=1, bias=False)
         self.gradient_conv.weight = nn.Parameter(sobel_weight, requires_grad=False)
+
     def forward(self, x):
         F_rgb, F_thermal = x
         gray_rgb = 0.2989 * F_rgb[:, 0:1] + 0.5870 * F_rgb[:, 1:2] + 0.1140 * F_rgb[:, 2:3]
@@ -1145,17 +1151,18 @@ class EdgeGenerator(nn.Module):
         G_thermal = self.gradient_conv(gray_thermal)
         return G_rgb + G_thermal
 
+
 # 用这个版本完全替换你原来的 ChannelAttention
 # 用这个新的、更简洁的版本替换你原来的 ChannelAttention 类
 class ChannelAttention(nn.Module):
     def __init__(self, in_planes, ratio=16):
-        super(ChannelAttention, self).__init__()
+        super().__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         # 我们已经移除了会引发确定性错误的 AdaptiveMaxPool2d
         self.fc = nn.Sequential(
             nn.Linear(in_planes, in_planes // ratio, bias=False),
             nn.ReLU(inplace=True),
-            nn.Linear(in_planes // ratio, in_planes, bias=False)
+            nn.Linear(in_planes // ratio, in_planes, bias=False),
         )
         self.sigmoid = nn.Sigmoid()
 
@@ -1165,11 +1172,12 @@ class ChannelAttention(nn.Module):
         y = self.fc(self.avg_pool(x).view(b, c)).view(b, c, 1, 1)
         return self.sigmoid(y)
 
+
 # 用这个版本完全替换你原来的 SpatialAttention
 class SpatialAttention(nn.Module):
     def __init__(self, kernel_size=7):
-        super(SpatialAttention, self).__init__()
-        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        super().__init__()
+        assert kernel_size in (3, 7), "kernel size must be 3 or 7"
         padding = 3 if kernel_size == 7 else 1
         self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
         self.sigmoid = nn.Sigmoid()
@@ -1177,10 +1185,10 @@ class SpatialAttention(nn.Module):
     def forward(self, x):
         # 在模块的最开始就强制内存连续，杜绝后患
         x = x.contiguous()
-        
+
         avg_out = torch.mean(x, dim=1, keepdim=True)
         max_out, _ = torch.max(x, dim=1, keepdim=True)
-        
+
         # 明确地将拼接结果赋给一个新变量
         x_cat = torch.cat([avg_out, max_out], dim=1)
         x_cat = self.conv1(x_cat)
@@ -1189,7 +1197,7 @@ class SpatialAttention(nn.Module):
 
 class CBAM(nn.Module):
     def __init__(self, in_planes, ratio=16, kernel_size=7):
-        super(CBAM, self).__init__()
+        super().__init__()
         # 确保这里调用的是上面重构后的新版本
         self.ca = ChannelAttention(in_planes, ratio)
         self.sa = SpatialAttention(kernel_size)
@@ -1199,12 +1207,13 @@ class CBAM(nn.Module):
         original_dtype = x.dtype
         with torch.cuda.amp.autocast(enabled=False):
             x_float = x.float()
-            
+
             # 使用重构后的模块进行计算
             x_float = self.ca(x_float) * x_float
             x_float = self.sa(x_float) * x_float
-        
+
         return x_float.to(original_dtype)
+
 
 class CosineGuidedFusion(nn.Module):
     def __init__(self, c_in, c_out):
@@ -1215,7 +1224,7 @@ class CosineGuidedFusion(nn.Module):
         sobel_weight = torch.stack([sobel_x, sobel_y]).unsqueeze(1)
         self.gradient_conv = nn.Conv2d(c_in, c_in * 2, kernel_size=3, padding=1, groups=c_in, bias=False)
         self.gradient_conv.weight = nn.Parameter(sobel_weight.repeat(c_in, 1, 1, 1), requires_grad=False)
-        
+
         # Softmax和最后的1x1卷积层也保持不变
         self.softmax = nn.Softmax(dim=1)
         self.final_conv = nn.Conv2d(c_in, c_out, kernel_size=1)
@@ -1245,13 +1254,13 @@ class CosineGuidedFusion(nn.Module):
         # 后续的计算逻辑完全不变，但输入已经是“精炼”过的数据了
         sim_rgb = F.cosine_similarity(G_rgb.view(B, -1), G_anchor.view(B, -1), dim=1)
         sim_thermal = F.cosine_similarity(G_thermal.view(B, -1), G_anchor.view(B, -1), dim=1)
-        
+
         similarities = torch.stack([sim_rgb, sim_thermal], dim=1)
         weights = self.softmax(similarities)
         w_rgb = weights[:, 0].view(B, 1, 1, 1)
         w_thermal = weights[:, 1].view(B, 1, 1, 1)
-        
+
         # 注意：最终加权的还是【原始】的特征图，注意力机制只用于帮助计算出更准确的权重
         F_weighted_fused = w_rgb * F_rgb + w_thermal * F_thermal
-        
+
         return self.final_conv(F_weighted_fused)
